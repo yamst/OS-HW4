@@ -5,9 +5,9 @@
 #define P2_MAX_ALLOC 100000000
 #define MINIMUM_SIZE_FOR_SPLIT 128
 
-/* next free and prev free in struct mallocmetadata are uninitialized for allocated blocks */
-
+/* next_free and prev_free in struct mallocmetadata are uninitialized for used blocks */
 struct MallocMetadata {
+    int m_cookie;
     size_t m_size;
     bool m_is_free;
     MallocMetadata* m_next;
@@ -22,6 +22,7 @@ size_t free_blocks = 0;
 size_t free_bytes = 0;
 size_t allocated_blocks = 0;
 size_t allocated_bytes = 0;
+int cookie_value = rand();
 
 void* smalloc(size_t size);
 void* scalloc(size_t num, size_t size);
@@ -35,33 +36,48 @@ size_t _num_allocated_bytes();
 size_t _num_meta_data_bytes();
 size_t _size_meta_data();
 
+#define getDataAdress(meta) (void*)(((char*)meta)+sizeof(MallocMetadata))
+#define testCookie(meta) if(meta->m_cookie!=cookie_value){exit(0xdeadbeef);}
 
-/* inserts an initilized allocated block to the sorted list*/
+
+
+/*** FUNCTIONS FOR SORTED LIST OPERATIONS. DO NOT UPDATE ANY GLOBAL COUNTERS. ***/
+/* inserts an initilized not-free block to the sorted list.*/
 void _insert_in_sorted_list(MallocMetadata* node);
-
-/* inserts @param node in the sorted list after @param before. if @param before is NULL then inserts at the beginning.*/
+/* Helper function for _insert_in_sorted_list.
+Inserts @param node in the sorted list after @param before. if @param before is NULL then inserts at the beginning.*/
 void _insert_in_sorted_list_after(MallocMetadata* node, MallocMetadata* before);
-
-/* remove a node from the sorted list*/
+/* remove a non-free node from the sorted list.*/
 void _remove_from_sorted_list(MallocMetadata* node);
+/* update size of block and puts it in the correct location in the sorted list.*/
+void _update_block_size(MallocMetadata* node, size_t size);
 
-/* puts a block whose size changed in the correct location in the sorted list*/
-void _update_location_in_sorted_list(MallocMetadata* node);
 
-/* allocates size out of free node and adds the rest as a free block to the list*/
-void _free_block_split(MallocMetadata* node, size_t size)
+
+
+/* splits @param node (assumed to be a free block) into two free blocks of sizes @param size and the rest. 
+Updates global counters accordingly.*/
+void _free_block_split(MallocMetadata* node, size_t size);
+
+/* removes a block from free list and sets it as not free. Updates global counters accordingly.*/
+void _unfree(MallocMetadata* node);
+
+/* merges left and right if they are adjacent and non-NULL. returns the right meta data or new merged meta data.
+Updates Global Counters Accordingly.*/
+MallocMetadata* _merge_two_frees(MallocMetadata* left, MallocMetadata* right)
+
+/* takes a block (already in the list) and adds it to the free list - with coalescing. Updates global counters accordingly. */
+void _free_and_coalesce(MallocMetadata* node);
+
+
+/* returns last free block in list, by adress order. */
+MallocMetadata* _find_last_free();
 
 /* finds the free block in the list that is nearest but before node. returns NULL if doesn't exist*/
-MallocMetadata* _find_prior_free(MallocMetadata* node)
+MallocMetadata* _find_prior_free(MallocMetadata* node);
 
 /* finds the free block in the list that is nearest but after node. returns NULL if doesn't exist*/
 MallocMetadata* _find_subsequent_free(MallocMetadata* node);
-
-
-/* takes a block (already in the list) and adds it to the free list - with coalescing. */
-void _add_to_free_list_and_coalesce(MallocMetadata* node);
-
-
 
 
 void* smalloc(size_t size){
@@ -70,22 +86,30 @@ void* smalloc(size_t size){
     }
     MallocMetadata * current = start_meta_data;
     while (current != NULL){
+        //testCookie(current)
         if((current -> m_is_free) && ((current -> m_size) >= size)){
             if ((current -> m_size) >= size + MINIMUM_SIZE_FOR_SPLIT + sizeof(MallocMetadata)){
                 _free_block_split(current, size);
-                free_blocks++;
-                free_bytes -= sizeof(MallocMetadata);
             }
-            current -> m_is_free = false;
-            free_blocks --;
-            free_bytes  -= (current -> m_size);
-            return (void*)(((char*)current) + sizeof(MallocMetadata)); 
+            _unfree(current);
+            return getDataAdress(current);
         }
         current = current -> m_next;
-    }
-    //if reached this point, a new block needs to be created
+    } //loop will handle case where moving the program break isn't needed.
+    
+    MallocMetadata* last_free = _find_last_free();
+    if ((last_free != NULL) && (sbrk(0) == (char*)last_free + sizeof(MallocMetadata)+ (last_free -> m_size))){
+        assert(size > last_free -> m_size);
+        if (sbrk(size - (last_free -> m_size)) == (void*)-1){
+            return NULL;
+        }
+        _unfree(last_free);
+        allocated_bytes += (size - last_free -> m_size);
+        _update_block_size(last_free, size);
+        return getDataAdress(last_free);
+    }//try to extend wilderness block
     MallocMetadata* new_block = (MallocMetadata*)sbrk((intptr_t)(size + sizeof(MallocMetadata)));
-    if (new_block == (void*)-1){
+    if (new_block == (MallocMetadata*)(void*)-1){
         return NULL;
     }
     new_block -> m_is_free = false;
@@ -93,8 +117,9 @@ void* smalloc(size_t size){
     _insert_in_sorted_list(new_block);
     allocated_blocks ++;
     allocated_bytes += size;
-    return (void*)((char*)new_block + sizeof(MallocMetadata));
+    return getDataAdress(new_block);
 }
+
 
 void* scalloc(size_t num, size_t size){
     void* allocated = smalloc(num * size);
@@ -113,9 +138,7 @@ void sfree(void* p){
     if (to_free -> m_is_free){
         return;
     }
-    _add_to_free_list_and_coalesce(to_free);
-    free_blocks ++;
-    free_bytes += to_free -> m_size;
+    free_and_coalesce(to_free);
 }
 
 void* srealloc(void* oldp, size_t size){
@@ -138,43 +161,27 @@ void* srealloc(void* oldp, size_t size){
     return to_return;
 }
 
+
 size_t _num_free_blocks(){
     return free_blocks;
 }
-
 size_t _num_free_bytes(){
     return free_bytes;
 }
-
 size_t _num_allocated_blocks(){
     return allocated_blocks;
 }
-
 size_t _num_allocated_bytes(){
     return allocated_bytes;
 }
-
 size_t _num_meta_data_bytes(){
     return allocated_blocks * sizeof(MallocMetadata);
 }
-
 size_t _size_meta_data(){
     return sizeof(MallocMetadata);
 }
 
 
-
-void _remove_from_sorted_list(MallocMetadata* node){
-    if (start_meta_data == node){
-        start_meta_data = node -> m_next;
-    }
-    if (node -> m_prev != NULL){
-        node -> m_prev -> m_next = node -> m_next;
-    }
-    if (node -> m_next != NULL){
-        node -> m_next -> m_prev = node -> m_prev;
-    }
-}
 
 void _insert_in_sorted_list(MallocMetadata* node){
     MallocMetadata* current = start_meta_data;
@@ -202,17 +209,32 @@ void _insert_in_sorted_list_after(MallocMetadata* node, MallocMetadata* before){
     }  else    {
         node -> m_next = before -> m_next;
         node -> m_prev = before;
-        if (current -> m_next != NULL){
-            current -> m_next -> m_prev = node;
+        if (before -> m_next != NULL){
+            before -> m_next -> m_prev = node;
         }
-        current -> m_next = node;
+        before -> m_next = node;
     }
 }
 
-void _update_location_in_sorted_list(MallocMetadata* node){
+void _remove_from_sorted_list(MallocMetadata* node){
+    assert(node != NULL);
+    if (start_meta_data == node){
+        start_meta_data = node -> m_next;
+    }
+    if (node -> m_prev != NULL){
+        node -> m_prev -> m_next = node -> m_next;
+    }
+    if (node -> m_next != NULL){
+        node -> m_next -> m_prev = node -> m_prev;
+    }
+}
+
+void _update_block_size(MallocMetadata* node, size_t size){
     _remove_from_sorted_list(node);
+    node -> m_size = size;
     _insert_to_sorted_list(node);
 }
+
 
 void _free_block_split(MallocMetadata* node, size_t size){
     assert(node != NULL);
@@ -223,15 +245,20 @@ void _free_block_split(MallocMetadata* node, size_t size){
     new_block -> m_is_free = true;
     new_block -> m_size = ((node -> m_size) - size)- sizeof(MallocMetadata);
 
-    if (start_free_list == node){
-        start_free_list = new_block;
-    }
     new_block -> m_next_free = node -> m_next_free;
-    new_block -> m_prev_free = node -> m_prev_free;
+    new_block -> m_prev_free = node;
+    
+    if (node -> m_next_free != NULL){
+        node -> m_next_free -> m_prev_free = new_block;
+    }
+    node -> m_next_free = new_block;
+
+    _update_block_size(node, size);
     _insert_in_sorted_list(new_block);
-    node -> m_is_free = false;
-    node -> m_size = size;
-    _update_location_in_sorted_list(node);
+    free_blocks++;
+    allocated_blocks++;
+    free_bytes -= sizeof(MallocMetadata);
+    allocted_bytes -= sizeof(MallocMetadata);
 }
 
 MallocMetadata* _find_prior_free(MallocMetadata* node){
@@ -256,11 +283,15 @@ MallocMetadata* _find_subsequent_free(MallocMetadata* node){
     return iter;
 }
 
-void _add_to_free_list_and_coalesce(MallocMetadata* node){
-    
+void free_and_coalesce(MallocMetadata* node){
+    assert(!(node -> m_is_free));
     MallocMetadata* previous = _find_prior_free(node);
     MallocMetadata* next = _find_subsequent_free(node);
+
     node -> m_is_free = true;
+    free_blocks ++;
+    free_bytes += node -> m_size;
+
     node -> m_next_free = next;
     node -> m_prev_free = previous;
     if (previous != NULL){
@@ -273,26 +304,51 @@ void _add_to_free_list_and_coalesce(MallocMetadata* node){
     }
     node = _merge_two_frees(previous, node);
     _merge_two_frees(node, next);
-
-
 }
 
 
-/* merges left and right if they are adjacent and non-NULL. returns the right data or new merged data*/
 MallocMetadata* _merge_two_frees(MallocMetadata* left, MallocMetadata* right){
-    if (left == NULL || right == NULL || ((void*) ((char*)left + sizeof(MallocMetadata) + left -> m_size) != (void*) right)){
+    if (left == NULL || right == NULL || ((void*) ((char*)left + sizeof(MallocMetadata) + (left -> m_size)) != (void*) right)){
         return right;
     }// if one of the nodes is not valid or nodes aren't adjacent
+    assert(left -> m_is_free && right -> m_is_free);
     free_blocks --;
     allocated_blocks--;
     free_bytes += sizeof(MallocMetadata);
-    left -> m_size = ((left -> m_size) + sizeof(MallocMetadata) + (right -> m_size));
+    allocated_bytes += sizeof(MallocMetadata);
+    
+    _remove_from_sorted_list(right);
     left -> m_next_free = right -> m_next_free;
     if (right -> m_next_free != NULL){
         right -> m_next_free -> m_prev_free = left;
-    }
-    _remove_from_sorted_list(left);
-    _remove_from_sorted_list(right);
-    _insert_in_sorted_list(left);
+    }//right is fully deleted.
+    _update_block_size(left, ((left -> m_size) + sizeof(MallocMetadata) + (right -> m_size)));
     return left;
+}
+
+MallocMetadata* find_last_free(){
+    MallocMetadata* iter = start_free_list;
+    if (iter == NULL){
+        return NULL;
+    }
+    while (iter -> m_next_free != NULL){
+        iter = iter -> m_next_free;
+    }
+    return iter;
+}
+
+void _unfree(MallocMetadata* node){
+    assert(node != NULL);
+    if (start_free_list == node){
+        start_free_list = node -> m_next_free;
+    }
+    if (node -> m_prev_free != NULL){
+        node -> m_prev_free -> m_next_free = node -> m_next_free;
+    }
+    if (node -> m_next_free != NULL){
+        node -> m_next_free -> m_prev_free = node -> m_prev_free;
+    }
+    node -> m_is_free = false;
+    free_blocks --;
+    free_bytes  -= (node -> m_size);
 }
