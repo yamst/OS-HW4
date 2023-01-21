@@ -4,10 +4,8 @@
 #include <cstdlib>
 
 #define P2_MAX_ALLOC 100000000
-#define MINIMUM_SIZE_FOR_SPLIT 128
 #define BUFFER_OVERFLOW_EXIT_VAL 0xdeadbeef
 
-/* next_free and prev_free in struct mallocmetadata are uninitialized for used blocks */
 struct MallocMetadata {
     int m_cookie;
     size_t m_size;
@@ -16,21 +14,12 @@ struct MallocMetadata {
     MallocMetadata* m_prev;
     MallocMetadata* m_next_free;
     MallocMetadata* m_prev_free;
-};
-
-MallocMetadata* start_meta_data = NULL;
-MallocMetadata* start_free_list = NULL;
-size_t free_blocks = 0;
-size_t free_bytes = 0;
-size_t allocated_blocks = 0;
-size_t allocated_bytes = 0;
-int cookie_value = rand();
+};/* next_free and prev_free in struct mallocmetadata are uninitialized for used blocks */
 
 void* smalloc(size_t size);
 void* scalloc(size_t num, size_t size);
 void sfree(void* p);
 void* srealloc(void* oldp, size_t size);
-
 size_t _num_free_blocks();
 size_t _num_free_bytes();
 size_t _num_allocated_blocks();
@@ -38,7 +27,19 @@ size_t _num_allocated_bytes();
 size_t _num_meta_data_bytes();
 size_t _size_meta_data();
 
-#define getDataAdress(meta) (void*)(((char*)meta)+sizeof(MallocMetadata))
+MallocMetadata* start_meta_data = NULL;
+MallocMetadata* start_free_list = NULL;
+MallocMetadata* start_mmap_list = NULL;
+MallocMetadata* end_mmap_list = NULL;
+size_t free_blocks = 0;
+size_t free_bytes = 0;
+size_t allocated_blocks = 0;
+size_t allocated_bytes = 0;
+int cookie_value = rand();
+
+#define getDataAdress(meta) (meta==NULL?NULL:(void*)(((char*)meta)+sizeof(MallocMetadata)))
+#define MINIMUM_SIZE_FOR_MMAP 128*1024
+#define MINIMUM_SIZE_FOR_SPLIT 128
 
 /*** FUNCTIONS FOR SORTED LIST OPERATIONS. DO NOT UPDATE ANY GLOBAL COUNTERS. ***/
 /* inserts an initilized not-free block to the sorted list.*/
@@ -51,21 +52,16 @@ void _remove_from_sorted_list(MallocMetadata* node);
 /* update size of block and puts it in the correct location in the sorted list.*/
 void _update_block_size(MallocMetadata* node, size_t size);
 
-
 /* splits @param node (assumed to be a free block) into two free blocks of sizes @param size and the rest. 
 Updates global counters accordingly.*/
 void _free_block_split(MallocMetadata* node, size_t size);
-
 /* removes a block from free list and sets it as not free. Updates global counters accordingly.*/
 void _unfree(MallocMetadata* node);
-
 /* merges left and right if they are adjacent and non-NULL. returns the right meta data or new merged meta data.
 Updates Global Counters Accordingly.*/
 MallocMetadata* _merge_two_frees(MallocMetadata* left, MallocMetadata* right);
-
 /* takes a block (already in the list) and adds it to the free list - with coalescing. Updates global counters accordingly. */
 void _free_and_coalesce(MallocMetadata* node);
-
 
 /* returns last free block in list, by adress order. returns NULL if free list is empty. */
 MallocMetadata* _find_last_free();
@@ -79,11 +75,17 @@ bool _testCookie(MallocMetadata* meta);
 /* initializes a block with cookie, free status, and size*/
 void _initialize_block(MallocMetadata* node, bool is_free, size_t size);
 
+/* allocates a new block with mmap (including adding to list & updating counters) and returns its meta. NULL if failed*/
+MallocMetadata* _mmap_allocate(size_t size);
 
 void* smalloc(size_t size){
     if (size == 0 || size > P2_MAX_ALLOC){
         return NULL;
     }
+    if (size >= MINIMUM_SIZE_FOR_MMAP) {
+        return getDataAdress(_mmap_allocate(size));
+    }// mmap for large allocations
+
     MallocMetadata * current = start_meta_data;
     while (current != NULL && _testCookie(current)){
         if((current -> m_is_free) && ((current -> m_size) >= size)){
@@ -118,7 +120,6 @@ void* smalloc(size_t size){
     return getDataAdress(new_block);
 }
 
-
 void* scalloc(size_t num, size_t size){
     void* allocated = smalloc(num * size);
     if (allocated == NULL){
@@ -133,11 +134,28 @@ void sfree(void* p){
         return;
     }
     MallocMetadata * to_free = (MallocMetadata *)((char*) p - sizeof(MallocMetadata));
-    _testCookie(to_free);
-    if (to_free -> m_is_free){
+    if (_testCookie(to_free) && to_free -> m_is_free){
         return;
     }
-    _free_and_coalesce(to_free);
+    if (to_free -> m_size >= MINIMUM_SIZE_FOR_MMAP) { // block is a mapped memory region
+        allocated_blocks--;
+        allocated_bytes -= to_free -> m_size;
+        if (to_free -> m_prev != NULL && testCookie(to_free -> m_prev)) {
+            to_free -> m_prev -> m_next = to_free -> m_next;
+        }
+        if (to_free -> m_next != NULL && testCookie(to_free -> m_next)) {
+            to_free -> m_next -> m_prev = to_free -> m_prev;
+        }
+        if (start_mmap_list == to_free) {
+            start_mmap_list = to_free -> m_next;
+        }
+        if (end_mmap_list == to_free) {
+            end_mmap_list = to_free -> m_prev;
+        }
+        munmap((void*)to_free, sizeof(MallocMetadata) + to_free -> m_size);
+    }   else    {
+        _free_and_coalesce(to_free);
+    }
 }
 
 void* srealloc(void* oldp, size_t size){
@@ -147,6 +165,14 @@ void* srealloc(void* oldp, size_t size){
     if (oldp == NULL){
         return smalloc(size);
     }
+
+    //TO_FINISH
+
+
+
+
+
+
     MallocMetadata* old_meta = (MallocMetadata *)((char*) oldp - sizeof(MallocMetadata));
     _testCookie(old_meta);
     assert(old_meta -> m_is_free == false);
@@ -160,7 +186,6 @@ void* srealloc(void* oldp, size_t size){
     }
     return to_return;
 }
-
 
 size_t _num_free_blocks(){
     return free_blocks;
@@ -180,8 +205,6 @@ size_t _num_meta_data_bytes(){
 size_t _size_meta_data(){
     return sizeof(MallocMetadata);
 }
-
-
 
 void _insert_in_sorted_list(MallocMetadata* node){
     _testCookie(node);
@@ -237,7 +260,6 @@ void _update_block_size(MallocMetadata* node, size_t size){
     node -> m_size = size;
     _insert_in_sorted_list(node);
 }
-
 
 void _free_block_split(MallocMetadata* node, size_t size){
     _testCookie(node);
@@ -310,7 +332,6 @@ void _free_and_coalesce(MallocMetadata* node){
     _merge_two_frees(node, next);
 }
 
-
 MallocMetadata* _merge_two_frees(MallocMetadata* left, MallocMetadata* right){
     if (left == NULL || right == NULL || ((void*) ((char*)left + sizeof(MallocMetadata) + (left -> m_size)) != (void*) right)){
         return right;
@@ -365,11 +386,28 @@ bool _testCookie(MallocMetadata* meta) {
     return true;
 }
 
-
-
 void _initialize_block(MallocMetadata* node, bool is_free, size_t size){
     assert(node != NULL);
     node -> m_is_free = is_free;
     node -> m_size = size;
     node -> m_cookie = cookie_value;
+}
+
+MallocMetadata* _mmap_allocate(size_t size){
+    MallocMetadata* new_block = (MallocMetadata*)mmap(NULL, size + sizeof(MallocMetadata),
+    PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if ((void*)new_block == MAP_FAILED){
+        return NULL;
+    }
+    _initialize_block(new_block, false, size);
+    new_block -> m_prev = end_mmap_list;
+    new_block -> m_next = NULL;
+    if (end_mmap_list != NULL && testCookie(end_mmap_list)) {
+        end_mmap_list -> m_next = new_block;
+    }   else    {
+        start_mmap_list = new_block;
+    }
+    end_mmap_list = new_block;
+    allocated_blocks++;
+    allocated_bytes += size;
 }
