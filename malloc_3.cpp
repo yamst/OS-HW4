@@ -4,6 +4,7 @@
 
 #define P2_MAX_ALLOC 100000000
 #define MINIMUM_SIZE_FOR_SPLIT 128
+#define BUFFER_OVERFLOW_EXIT_VAL 0xdeadbeef
 
 /* next_free and prev_free in struct mallocmetadata are uninitialized for used blocks */
 struct MallocMetadata {
@@ -37,7 +38,7 @@ size_t _num_meta_data_bytes();
 size_t _size_meta_data();
 
 #define getDataAdress(meta) (void*)(((char*)meta)+sizeof(MallocMetadata))
-#define testCookie(meta) if(meta->m_cookie!=cookie_value){exit(0xdeadbeef);}
+
 
 
 
@@ -51,8 +52,6 @@ void _insert_in_sorted_list_after(MallocMetadata* node, MallocMetadata* before);
 void _remove_from_sorted_list(MallocMetadata* node);
 /* update size of block and puts it in the correct location in the sorted list.*/
 void _update_block_size(MallocMetadata* node, size_t size);
-
-
 
 
 /* splits @param node (assumed to be a free block) into two free blocks of sizes @param size and the rest. 
@@ -70,14 +69,15 @@ MallocMetadata* _merge_two_frees(MallocMetadata* left, MallocMetadata* right)
 void _free_and_coalesce(MallocMetadata* node);
 
 
-/* returns last free block in list, by adress order. */
+/* returns last free block in list, by adress order. returns NULL if free list is empty. */
 MallocMetadata* _find_last_free();
-
 /* finds the free block in the list that is nearest but before node. returns NULL if doesn't exist*/
 MallocMetadata* _find_prior_free(MallocMetadata* node);
-
 /* finds the free block in the list that is nearest but after node. returns NULL if doesn't exist*/
 MallocMetadata* _find_subsequent_free(MallocMetadata* node);
+
+/* verifies meta's cookie, assuming it isn't NULL. exits program if cookie is invalid.*/
+bool testCookie(MallocMetadata* meta);
 
 
 void* smalloc(size_t size){
@@ -85,8 +85,7 @@ void* smalloc(size_t size){
         return NULL;
     }
     MallocMetadata * current = start_meta_data;
-    while (current != NULL){
-        //testCookie(current)
+    while (current != NULL && testCookie(current)){
         if((current -> m_is_free) && ((current -> m_size) >= size)){
             if ((current -> m_size) >= size + MINIMUM_SIZE_FOR_SPLIT + sizeof(MallocMetadata)){
                 _free_block_split(current, size);
@@ -98,7 +97,7 @@ void* smalloc(size_t size){
     } //loop will handle case where moving the program break isn't needed.
     
     MallocMetadata* last_free = _find_last_free();
-    if ((last_free != NULL) && (sbrk(0) == (char*)last_free + sizeof(MallocMetadata)+ (last_free -> m_size))){
+    if ((last_free != NULL) &&testCookie(last_free) &&(sbrk(0) == (char*)last_free + sizeof(MallocMetadata)+(last_free -> m_size))){
         assert(size > last_free -> m_size);
         if (sbrk(size - (last_free -> m_size)) == (void*)-1){
             return NULL;
@@ -135,6 +134,7 @@ void sfree(void* p){
         return;
     }
     MallocMetadata * to_free = (MallocMetadata *)((char*) p - sizeof(MallocMetadata));
+    testCookie(to_free);
     if (to_free -> m_is_free){
         return;
     }
@@ -149,6 +149,7 @@ void* srealloc(void* oldp, size_t size){
         return smalloc(size);
     }
     MallocMetadata* old_meta = (MallocMetadata *)((char*) oldp - sizeof(MallocMetadata));
+    testCookie(old_meta);
     assert(old_meta -> m_is_free == false);
     if (old_meta -> m_size >= size){
         return oldp;
@@ -184,15 +185,17 @@ size_t _size_meta_data(){
 
 
 void _insert_in_sorted_list(MallocMetadata* node){
+    testCookie(node);
     MallocMetadata* current = start_meta_data;
-    if ((current == NULL) || (current -> m_size > node -> m_size) || ((current -> m_size == node -> m_size) && (current > node))){
+    if ((current == NULL) || (!testCookie(current)) || (current -> m_size > node -> m_size) ||
+    ((current -> m_size == node -> m_size) && (current > node))){
         _insert_in_sorted_list_after(node, NULL);
     }   else    {
-        while ((current -> m_next != NULL) && ((current -> m_next -> m_size < node -> m_size) ||
-        ((current -> m_next -> m_size == node -> m_size) && ((current -> m_next) < node)))){
+        while ((current -> m_next != NULL) && (testCookie(current -> m_next)) && ((current -> m_next -> m_size < node -> m_size)
+        || ((current -> m_next -> m_size == node -> m_size) && ((current -> m_next) < node)))){
             current = current -> m_next;
         }
-        assert(current != NULL);
+        assert(current != NULL && testCookie(current));
         _insert_in_sorted_list_after(node, current);
     }  
 }
@@ -214,17 +217,18 @@ void _insert_in_sorted_list_after(MallocMetadata* node, MallocMetadata* before){
         }
         before -> m_next = node;
     }
-}
+}//no need to test cookies as they were tested by caller function
 
 void _remove_from_sorted_list(MallocMetadata* node){
+    testCookie(node);
     assert(node != NULL);
     if (start_meta_data == node){
         start_meta_data = node -> m_next;
     }
-    if (node -> m_prev != NULL){
+    if (node -> m_prev != NULL && testCookie(node -> m_prev)){
         node -> m_prev -> m_next = node -> m_next;
     }
-    if (node -> m_next != NULL){
+    if (node -> m_next != NULL && testCookie(node -> m_next)){
         node -> m_next -> m_prev = node -> m_prev;
     }
 }
@@ -237,6 +241,7 @@ void _update_block_size(MallocMetadata* node, size_t size){
 
 
 void _free_block_split(MallocMetadata* node, size_t size){
+    testCookie(node);
     assert(node != NULL);
     assert(((node -> m_size) - size)- sizeof(MallocMetadata) >= MINIMUM_SIZE_FOR_SPLIT);
     assert(node -> m_is_free);
@@ -248,7 +253,7 @@ void _free_block_split(MallocMetadata* node, size_t size){
     new_block -> m_next_free = node -> m_next_free;
     new_block -> m_prev_free = node;
     
-    if (node -> m_next_free != NULL){
+    if (node -> m_next_free != NULL && testCookie(node -> m_next_free)){
         node -> m_next_free -> m_prev_free = new_block;
     }
     node -> m_next_free = new_block;
@@ -263,11 +268,11 @@ void _free_block_split(MallocMetadata* node, size_t size){
 
 MallocMetadata* _find_prior_free(MallocMetadata* node){
     MallocMetadata* iter = start_free_list;
-    if (iter == NULL || iter > node){
+    if (iter == NULL || iter > node || (!testCookie(iter))){
         return NULL;
     }
     assert(iter -> m_is_free);
-    while (iter -> m_next_free != NULL && iter -> m_next_free > node){
+    while (iter -> m_next_free != NULL && testCookie(iter -> m_next_free) && iter -> m_next_free > node){
         iter = iter -> m_next;
         assert(iter -> m_is_free);
     }
@@ -276,7 +281,7 @@ MallocMetadata* _find_prior_free(MallocMetadata* node){
 
 MallocMetadata* _find_subsequent_free(MallocMetadata* node){
     MallocMetadata* iter = start_free_list;
-    while(iter != NULL && iter < node){
+    while(iter != NULL && testCookie(iter) && iter < node){
         assert(iter -> m_is_free);
         iter = iter -> m_next_free;
     }
@@ -284,6 +289,7 @@ MallocMetadata* _find_subsequent_free(MallocMetadata* node){
 }
 
 void free_and_coalesce(MallocMetadata* node){
+    testCookie(node);
     assert(!(node -> m_is_free));
     MallocMetadata* previous = _find_prior_free(node);
     MallocMetadata* next = _find_subsequent_free(node);
@@ -294,12 +300,12 @@ void free_and_coalesce(MallocMetadata* node){
 
     node -> m_next_free = next;
     node -> m_prev_free = previous;
-    if (previous != NULL){
+    if (previous != NULL && testCookie(previous)){
         previous -> m_next_free = node;
     }   else    {
         start_free_list = node;
     }
-    if (next != NULL){
+    if (next != NULL && testCookie(next)){
         next -> m_prev_free = node;
     }
     node = _merge_two_frees(previous, node);
@@ -319,7 +325,7 @@ MallocMetadata* _merge_two_frees(MallocMetadata* left, MallocMetadata* right){
     
     _remove_from_sorted_list(right);
     left -> m_next_free = right -> m_next_free;
-    if (right -> m_next_free != NULL){
+    if (right -> m_next_free != NULL && testCookie(right -> m_next_free)){
         right -> m_next_free -> m_prev_free = left;
     }//right is fully deleted.
     _update_block_size(left, ((left -> m_size) + sizeof(MallocMetadata) + (right -> m_size)));
@@ -328,27 +334,35 @@ MallocMetadata* _merge_two_frees(MallocMetadata* left, MallocMetadata* right){
 
 MallocMetadata* find_last_free(){
     MallocMetadata* iter = start_free_list;
-    if (iter == NULL){
+    if (iter == NULL || (!testCookie(iter))){
         return NULL;
     }
-    while (iter -> m_next_free != NULL){
+    while (iter -> m_next_free != NULL && testCookie(iter -> m_next_free)){
         iter = iter -> m_next_free;
     }
     return iter;
 }
 
 void _unfree(MallocMetadata* node){
+    testCookie(node);
     assert(node != NULL);
     if (start_free_list == node){
         start_free_list = node -> m_next_free;
     }
-    if (node -> m_prev_free != NULL){
+    if (node -> m_prev_free != NULL && testCookie(node -> m_prev_free)){
         node -> m_prev_free -> m_next_free = node -> m_next_free;
     }
-    if (node -> m_next_free != NULL){
+    if (node -> m_next_free != NULL && testCookie(node -> m_next_free)){
         node -> m_next_free -> m_prev_free = node -> m_prev_free;
     }
     node -> m_is_free = false;
     free_blocks --;
     free_bytes  -= (node -> m_size);
+}
+
+bool testCookie(MallocMetadata* meta) {
+    if(meta -> m_cookie != cookie_value){
+        exit(BUFFER_OVERFLOW_EXIT_VAL);
+    }
+    return true;
 }
