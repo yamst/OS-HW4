@@ -249,6 +249,8 @@ void* srealloc(void* oldp, size_t size){
         if (sbrk(add) == (void*)-1){
             return NULL;
         }
+        allocated_bytes += add;
+        free_bytes += add;
         _update_block_size(old_next_free, old_next_free -> m_size + add);
         old_meta = _free_and_coalesce(old_meta);
         memmove(getDataAdressNOTNULL(old_meta), oldp, original_size);
@@ -369,12 +371,8 @@ void _block_split(MallocMetadata* node, size_t size){
     }   else    {
         free_bytes += new_block -> m_size;
     }
-    if ((char*)new_block+ new_block -> m_size + sizeof(MallocMetadata) == (char*)next_free){
+    if ((char*)new_block + new_block -> m_size + sizeof(MallocMetadata) == (char*)next_free){
         _merge_two_frees(new_block, next_free);
-        free_blocks++;
-        allocated_blocks++;
-        free_bytes -= sizeof(MallocMetadata);
-        allocated_bytes -= sizeof(MallocMetadata);
     }
     allocated_bytes -= sizeof(MallocMetadata);
 }
