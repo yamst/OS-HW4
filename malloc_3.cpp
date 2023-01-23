@@ -175,6 +175,31 @@ void* srealloc(void* oldp, size_t size){
     _testCookies(old_meta);
     assert(old_meta -> m_is_free == false);
     size_t original_size = old_meta -> m_size;
+    size_t to_copy = (size < old_meta -> m_size)? size : old_meta -> m_size;
+
+    if (((size >= MINIMUM_SIZE_FOR_MMAP) && (old_meta -> m_size < MINIMUM_SIZE_FOR_MMAP)) ||
+    ((size < MINIMUM_SIZE_FOR_MMAP) && (old_meta -> m_size >= MINIMUM_SIZE_FOR_MMAP))){
+        void* to_return = smalloc(size);
+        if (to_return != NULL){
+            std::memmove(to_return, oldp, to_copy);
+            sfree(oldp);
+        }
+        return to_return; 
+    }//SHOULD NOT BE TESTED
+
+    if (old_meta -> m_size >= MINIMUM_SIZE_FOR_MMAP){
+        assert(size >=  MINIMUM_SIZE_FOR_MMAP);
+        if (size == old_meta -> m_size){
+            return oldp;
+        }
+        void* to_return = smalloc(size);
+        if (to_return != NULL){
+            memmove(to_return, oldp, to_copy);
+            sfree(oldp);
+        }
+        return to_return;
+    }//reallocated area is dealt by mmap. 
+
     if (old_meta -> m_size >= size){
         if ((size < MINIMUM_SIZE_FOR_MMAP) && ((old_meta -> m_size) >= sizeof(MallocMetadata) + size + MINIMUM_SIZE_FOR_SPLIT)){
             assert(old_meta -> m_size < MINIMUM_SIZE_FOR_MMAP);
@@ -182,15 +207,6 @@ void* srealloc(void* oldp, size_t size){
         }//split block
         return oldp;
     }// 1a. reallocate into a smaller block. Splits or does nothing
-
-    if (old_meta -> m_size >= MINIMUM_SIZE_FOR_MMAP){
-        void* to_return = smalloc(size);
-        if (to_return != NULL){
-            memmove(to_return, oldp, old_meta -> m_size);
-            sfree(oldp);
-        }
-        return to_return;
-    }//reallocated area is dealt by mmap. 
 
     MallocMetadata *old_prev_free = _find_prior_free(old_meta), *old_next_free = _find_subsequent_free(old_meta);
 
