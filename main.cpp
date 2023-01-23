@@ -8,12 +8,25 @@ void print_stats();
 
 int main(){
 
-    char *a = (char *)smalloc(32 + MINIMUM_SIZE_FOR_SPLIT + _size_meta_data());
+    
+    char *a = (char *)smalloc(128 + 32);
+    char *b = (char *)smalloc(32);
+    char *c = (char *)smalloc(32);
+    
     print_stats();
-    char *b = (char *)srealloc(a, 32);
+
+    sfree(a);
+    sfree(c);
+    
     print_stats();
-    sfree(b);
+
+    char *new_b = (char *)srealloc(b, 64);
+    
     print_stats();
+
+    sfree(new_b);
+    print_stats();
+
 }
 
 

@@ -56,6 +56,7 @@ void _remove_from_sorted_list(MallocMetadata* node);
 /* update size of block and puts it in the correct location in the sorted list.*/
 void _update_block_size(MallocMetadata* node, size_t size);
 
+/*** COMPLETE FUNCTIONS, update global counters as expected. ***/
 /* downsizes @param node to @param size if the remainder is large enough, and adds the rest as a free block.
 Updates global counters accordingly.*/
 void _block_split(MallocMetadata* node, size_t size);
@@ -68,7 +69,6 @@ Updates Global Counters Accordingly.*/
 MallocMetadata* _merge_two_frees(MallocMetadata* left, MallocMetadata* right);
 /* takes a block (already in the list) and adds it to the free list - with coalescing. Updates global counters accordingly. */
 MallocMetadata* _free_and_coalesce(MallocMetadata* node);
-
 /* returns last free block in list, by adress order. returns NULL if free list is empty. */
 MallocMetadata* _find_last_free();
 /* finds the free block in the list that is nearest but before node. returns NULL if doesn't exist*/
@@ -201,6 +201,7 @@ void* srealloc(void* oldp, size_t size){
             if (sbrk(size - (old_prev_free -> m_size + old_meta -> m_size + sizeof(MallocMetadata))) == (void*)-1){
                 return NULL;
             }
+            allocated_bytes += size - (old_prev_free -> m_size + old_meta -> m_size + sizeof(MallocMetadata));
             _update_block_size(old_meta, size - (old_prev_free -> m_size + sizeof(MallocMetadata)));
         }
             _free_block(old_meta);
@@ -216,8 +217,8 @@ void* srealloc(void* oldp, size_t size){
         if (sbrk(size - old_meta -> m_size ) == (void*)-1){
             return NULL;
         }
+        allocated_bytes += size - old_meta -> m_size;
         _update_block_size(old_meta, size);
-        _block_split(old_meta, size);
         return getDataAdress(old_meta);
     }// 1c. enlarge wilderness chunk just enough.
 
