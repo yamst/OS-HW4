@@ -176,7 +176,7 @@ void* srealloc(void* oldp, size_t size){
     assert(old_meta -> m_is_free == false);
     size_t original_size = old_meta -> m_size;
     if (old_meta -> m_size >= size){
-        if ((size < MINIMUM_SIZE_FOR_MMAP) && ((((old_meta -> m_size) - sizeof(MallocMetadata)) - size) >= MINIMUM_SIZE_FOR_SPLIT)){
+        if ((size < MINIMUM_SIZE_FOR_MMAP) && ((old_meta -> m_size) >= sizeof(MallocMetadata) + size + MINIMUM_SIZE_FOR_SPLIT)){
             assert(old_meta -> m_size < MINIMUM_SIZE_FOR_MMAP);
             _block_split(old_meta, size);
         }//split block
@@ -341,7 +341,7 @@ void _update_block_size(MallocMetadata* node, size_t size){
 void _block_split(MallocMetadata* node, size_t size){
     _testCookies(node);
     assert(node != NULL);
-    if(!(((node -> m_size) - size)- sizeof(MallocMetadata) >= MINIMUM_SIZE_FOR_SPLIT)){
+    if(!((node -> m_size) >= size + sizeof(MallocMetadata) + MINIMUM_SIZE_FOR_SPLIT)){
         return;
     }
     MallocMetadata *next_free = _find_subsequent_free(node), *prev_free = ((node -> m_is_free) ? node : _find_prior_free(node));
@@ -355,6 +355,8 @@ void _block_split(MallocMetadata* node, size_t size){
     }
     if (prev_free != NULL && _testCookies(prev_free)){
         prev_free -> m_next_free = new_block;
+    }   else    {
+        start_free_list = new_block;
     }
 
     _update_block_size(node, size);
@@ -366,12 +368,19 @@ void _block_split(MallocMetadata* node, size_t size){
     }   else    {
         free_bytes += new_block -> m_size;
     }
+    if ((char*)new_block+ new_block -> m_size + sizeof(MallocMetadata) == (char*)next_free){
+        _merge_two_frees(new_block, next_free);
+        free_blocks++;
+        allocated_blocks++;
+        free_bytes -= sizeof(MallocMetadata);
+        allocated_bytes -= sizeof(MallocMetadata);
+    }
     allocated_bytes -= sizeof(MallocMetadata);
 }
 
 MallocMetadata* _find_prior_free(MallocMetadata* node){
     MallocMetadata* iter = start_free_list;
-    if (iter == NULL || iter > node || (!_testCookies(iter))){
+    if (iter == NULL || iter >= node || (!_testCookies(iter))){
         return NULL;
     }
     assert(iter -> m_is_free);
