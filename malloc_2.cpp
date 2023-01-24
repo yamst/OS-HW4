@@ -50,7 +50,7 @@ void* smalloc(size_t size){
         current = current -> m_next;
     }
     MallocMetadata* new_block = (MallocMetadata*)sbrk((intptr_t)(size + sizeof(MallocMetadata)));
-    if (new_block == (void*)-1){
+    if ((void*)new_block == (void*)-1){
         return NULL;
     }
     new_block -> m_is_free = false;

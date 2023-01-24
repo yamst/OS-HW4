@@ -10,12 +10,13 @@
 struct MallocMetadata {
     int m_cookie;
     bool m_is_free;
+    bool m_scalloc_allocated; // defined only for mmaped blocks
     size_t m_size;
     
     MallocMetadata* m_next;
     MallocMetadata* m_prev;
-    MallocMetadata* m_next_free;
-    MallocMetadata* m_prev_free;
+    MallocMetadata* m_next_free; // defined only for free blocks
+    MallocMetadata* m_prev_free; // defined only for free blocks
 };/* next_free and prev_free in struct mallocmetadata are uninitialized for used blocks */
 
 void* smalloc(size_t size);
@@ -48,7 +49,7 @@ int cookie_value = rand();
 
 #define MINIMUM_SIZE_FOR_HUGE_PAGES_SMALLOC (4*1024*1024)
 #define MINIMUM_SIZE_FOR_HUGE_PAGES_SCALLOC (2*1024*1024)
-bool should_use_huge_pages = false;
+bool called_by_scalloc = false;
 
 /*** FUNCTIONS FOR SORTED LIST OPERATIONS. DO NOT UPDATE ANY GLOBAL COUNTERS. ***/
 /* inserts an initilized not-free block to the sorted list.*/
@@ -98,9 +99,6 @@ void* smalloc(size_t size){
         return NULL;
     }
     if (size >= MINIMUM_SIZE_FOR_MMAP) {
-        if (size >= MINIMUM_SIZE_FOR_HUGE_PAGES_SMALLOC){
-            should_use_huge_pages = true;
-        }
         MallocMetadata* new_block = _mmap_allocate(size);
         return getDataAdress(new_block);
     }// mmap for large allocations
@@ -140,10 +138,9 @@ void* smalloc(size_t size){
 
 
 void* scalloc(size_t num, size_t size){
-    if (align(num*size) >= MINIMUM_SIZE_FOR_HUGE_PAGES_SCALLOC){
-        should_use_huge_pages = true;
-    }
+    called_by_scalloc = true;
     void* allocated = smalloc(align(num * size));
+    called_by_scalloc = false;
     if (allocated == NULL){
         return NULL;
     }
@@ -209,7 +206,11 @@ void* srealloc(void* oldp, size_t size){
         if (size == old_meta -> m_size){
             return oldp;
         }
+        if (old_meta -> m_scalloc_allocated){
+            called_by_scalloc = true;
+        }
         void* to_return = smalloc(size);
+        called_by_scalloc = false;
         if (to_return != NULL){
             memmove(to_return, oldp, to_copy);
             sfree(oldp);
@@ -530,16 +531,22 @@ void _initialize_block(MallocMetadata* node, bool is_free, size_t size){
 
 MallocMetadata* _mmap_allocate(size_t size){
     MallocMetadata* new_block;
-    if (should_use_huge_pages){
+    if ((called_by_scalloc && size >= MINIMUM_SIZE_FOR_HUGE_PAGES_SCALLOC) || 
+    (!called_by_scalloc && size >= MINIMUM_SIZE_FOR_HUGE_PAGES_SMALLOC)){
         new_block = (MallocMetadata*)mmap(NULL, size + sizeof(MallocMetadata),
         PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE | MAP_HUGETLB, -1, 0);
-        should_use_huge_pages = false;
+
     }   else    {
         new_block = (MallocMetadata*)mmap(NULL, size + sizeof(MallocMetadata),
         PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
     }
     if ((void*)new_block == MAP_FAILED){
         return NULL;
+    }
+    if (called_by_scalloc){
+        new_block -> m_scalloc_allocated = true;
+    }   else    {
+        new_block -> m_scalloc_allocated = false;
     }
     _initialize_block(new_block, false, size);
     new_block -> m_prev = end_mmap_list;
