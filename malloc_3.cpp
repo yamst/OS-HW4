@@ -58,6 +58,7 @@ void _update_block_size(MallocMetadata* node, size_t size);
 
 /*** COMPLETE FUNCTIONS, update global counters as expected. ***/
 /* downsizes @param node to @param size if the remainder is large enough, and adds the rest as a free block.
+DOESN'T MERGE REMAINDER WITH FREE BLOCK TO THE RIGHT (if exists).
 Updates global counters accordingly.*/
 void _block_split(MallocMetadata* node, size_t size);
 /* removes a block from free list and sets it as not free. Updates global counters accordingly.*/
@@ -387,9 +388,9 @@ void _block_split(MallocMetadata* node, size_t size){
     }   else    {
         free_bytes += new_block -> m_size;
     }
-    if ((char*)new_block + new_block -> m_size + sizeof(MallocMetadata) == (char*)next_free){
-        _merge_two_frees(new_block, next_free);
-    }
+    //if ((char*)new_block + new_block -> m_size + sizeof(MallocMetadata) == (char*)next_free){
+    //   _merge_two_frees(new_block, next_free);
+    //} STATED ON PIAZZA NOT TO PERFORM
     allocated_bytes -= sizeof(MallocMetadata);
 }
 
