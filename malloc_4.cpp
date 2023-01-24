@@ -11,6 +11,7 @@ struct MallocMetadata {
     int m_cookie;
     bool m_is_free;
     size_t m_size;
+    
     MallocMetadata* m_next;
     MallocMetadata* m_prev;
     MallocMetadata* m_next_free;
@@ -44,6 +45,10 @@ int cookie_value = rand();
 #define isWilderness(meta) (sbrk(0)==getEndOfBlock(meta))
 #define MINIMUM_SIZE_FOR_MMAP (128*1024)
 #define MINIMUM_SIZE_FOR_SPLIT 128
+
+#define MINIMUM_SIZE_FOR_HUGE_PAGES_SMALLOC (4*1024*1024)
+#define MINIMUM_SIZE_FOR_HUGE_PAGES_SCALLOC (2*1024*1024)
+bool should_use_huge_pages = false;
 
 /*** FUNCTIONS FOR SORTED LIST OPERATIONS. DO NOT UPDATE ANY GLOBAL COUNTERS. ***/
 /* inserts an initilized not-free block to the sorted list.*/
@@ -81,15 +86,21 @@ MallocMetadata* _find_subsequent_free(MallocMetadata* node);
 bool _testCookies(MallocMetadata* meta1, MallocMetadata* meta2 = NULL, MallocMetadata* meta3 = NULL);
 /* initializes a block with cookie, free status, and size*/
 void _initialize_block(MallocMetadata* node, bool is_free, size_t size);
-
+/* expands size to nearest multiple of 8. */
+size_t align(size_t size);
 /* allocates a new block with mmap (including adding to list & updating counters) and returns its meta. NULL if failed*/
 MallocMetadata* _mmap_allocate(size_t size);
 
+
 void* smalloc(size_t size){
+    size = align(size);
     if (size == 0 || size > P3_MAX_ALLOC){
         return NULL;
     }
     if (size >= MINIMUM_SIZE_FOR_MMAP) {
+        if (size >= MINIMUM_SIZE_FOR_HUGE_PAGES_SMALLOC){
+            should_use_huge_pages = true;
+        }
         MallocMetadata* new_block = _mmap_allocate(size);
         return getDataAdress(new_block);
     }// mmap for large allocations
@@ -127,12 +138,16 @@ void* smalloc(size_t size){
     return getDataAdress(new_block);
 }
 
+
 void* scalloc(size_t num, size_t size){
-    void* allocated = smalloc(num * size);
+    if (align(num*size) >= MINIMUM_SIZE_FOR_HUGE_PAGES_SCALLOC){
+        should_use_huge_pages = true;
+    }
+    void* allocated = smalloc(align(num * size));
     if (allocated == NULL){
         return NULL;
     }
-    std::memset(allocated, 0, num * size);
+    std::memset(allocated, 0, align(num * size));
     return allocated;
 }
 
@@ -166,6 +181,7 @@ void sfree(void* p){
 }
 
 void* srealloc(void* oldp, size_t size){
+    size = align(size);
     if (size == 0 || size > P3_MAX_ALLOC){
         return NULL;
     }
@@ -513,8 +529,15 @@ void _initialize_block(MallocMetadata* node, bool is_free, size_t size){
 }
 
 MallocMetadata* _mmap_allocate(size_t size){
-    MallocMetadata* new_block = (MallocMetadata*)mmap(NULL, size + sizeof(MallocMetadata),
-    PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    MallocMetadata* new_block;
+    if (should_use_huge_pages){
+        new_block = (MallocMetadata*)mmap(NULL, size + sizeof(MallocMetadata),
+        PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE | MAP_HUGETLB, -1, 0);
+        should_use_huge_pages = false;
+    }   else    {
+        new_block = (MallocMetadata*)mmap(NULL, size + sizeof(MallocMetadata),
+        PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    }
     if ((void*)new_block == MAP_FAILED){
         return NULL;
     }
@@ -530,4 +553,12 @@ MallocMetadata* _mmap_allocate(size_t size){
     allocated_blocks++;
     allocated_bytes += size;
     return new_block;
+}
+
+size_t align(size_t size) {
+    int remainder = size % 8;
+    if (remainder == 0){
+        return size;
+    }
+    return (size + (8 - remainder));
 }
