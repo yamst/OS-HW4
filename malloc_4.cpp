@@ -94,6 +94,10 @@ MallocMetadata* _mmap_allocate(size_t size);
 
 
 void* smalloc(size_t size){
+    if (align((size_t)sbrk(0))-(size_t)sbrk(0)){
+		assert(allocated_blocks == 0 && start_meta_data == NULL);
+		sbrk(align((size_t)sbrk(0))-(size_t)sbrk(0));
+	}//can only happen on very first allocation.
     size = align(size);
     if (size == 0 || size > P3_MAX_ALLOC){
         return NULL;
